@@ -1,69 +1,41 @@
-name: Build and Deploy Custom Lambda Layer
+name: Build Bref PHP 8.3 Layer (GD + gRPC)
 
 on:
-  workflow_dispatch:  # Allows manual trigger from GitHub UI
-  push:
-    branches:
-      - main  # or your main branch name
+  workflow_dispatch:
 
 jobs:
   build-layer:
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: read
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Amazon ECR Public
-        uses: aws-actions/amazon-ecr-login@v1
-
-      - name: Set up AWS credentials
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1  # Update if you're using a different region
+          aws-region: us-east-1  # ✅ CHANGE if your region is different
 
-      - name: Build layer with GD and gRPC
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build Docker image
+        run: docker build -t php-layer .
+
+      - name: Extract /opt and zip it
         run: |
-          mkdir -p layer
-          cd layer
-          cat > Dockerfile <<'EOF'
-          FROM bref/php-83-fpm-dev:latest
+          CONTAINER_ID=$(docker create php-layer)
+          docker cp $CONTAINER_ID:/opt ./layer
+          docker rm $CONTAINER_ID
+          cd layer && zip -r ../layer.zip .
 
-          RUN yum install -y libpng libpng-devel freetype freetype-devel libjpeg libjpeg-devel autoconf gcc gcc-c++ make \
-              && pecl install grpc \
-              && docker-php-ext-configure gd --with-freetype --with-jpeg \
-              && docker-php-ext-install gd \
-              && mkdir -p /opt/bref/etc/php/conf.d \
-              && echo 'extension=gd.so' > /opt/bref/etc/php/conf.d/gd.ini \
-              && echo 'extension=grpc.so' > /opt/bref/etc/php/conf.d/grpc.ini
-          EOF
-
-          docker build -t custom-layer .
-
-          container_id=$(docker create custom-layer)
-          docker cp $container_id:/opt ./opt
-          docker rm $container_id
-
-      - name: Zip the layer
+      - name: Publish to Lambda Layer
         run: |
-          cd layer
-          zip -r ../custom-layer.zip opt
-
-      - name: Publish Lambda layer
-        run: |
-          LAYER_VERSION=$(aws lambda publish-layer-version \
-            --layer-name custom-gd-grpc-layer \
-            --zip-file fileb://custom-layer.zip \
-            --compatible-runtimes provided.al2 php-83 \
-            --output text \
-            --query Version)
-
-          echo "Published layer version: $LAYER_VERSION"
+          aws lambda publish-layer-version \
+            --layer-name php-83-gd-grpc \
+            --description "PHP 8.3 GD + gRPC layer" \
+            --zip-file fileb://layer.zip \
+            --compatible-runtimes provided.al2023 \
+            --region us-east-1
