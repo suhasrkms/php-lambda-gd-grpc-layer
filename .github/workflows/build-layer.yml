@@ -1,0 +1,52 @@
+name: Build GD + gRPC PHP 8.3 Layer
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+      LAYER_NAME: php-83-gd-grpc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Layer Image
+        run: |
+          echo "FROM bref/php-83-fpm-dev:latest
+          RUN yum install -y libpng libpng-devel freetype freetype-devel libjpeg libjpeg-devel autoconf gcc make \
+              && pecl install grpc \
+              && docker-php-ext-configure gd --with-freetype --with-jpeg \
+              && docker-php-ext-install gd \
+              && echo 'extension=gd.so' > /opt/bref/etc/php/conf.d/gd.ini \
+              && echo 'extension=grpc.so' > /opt/bref/etc/php/conf.d/grpc.ini" > Dockerfile
+
+          docker build -t php-83-layer .
+          CONTAINER=$(docker create php-83-layer)
+          docker cp $CONTAINER:/opt ./layer
+          docker rm $CONTAINER
+          cd layer && zip -r ../layer.zip .
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Publish Layer to AWS Lambda
+        run: |
+          aws lambda publish-layer-version \
+            --layer-name $LAYER_NAME \
+            --zip-file fileb://layer.zip \
+            --compatible-runtimes provided.al2
+
+      - name: Output Layer ARN
+        run: |
+          aws lambda list-layer-versions \
+            --layer-name $LAYER_NAME \
+            --query 'LayerVersions[0].LayerVersionArn' \
+            --output text
